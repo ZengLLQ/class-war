@@ -10,6 +10,15 @@ function json(data, status = 200) {
 function err(message, status = 400, extra = {}) {
   return NextResponse.json({ ok: false, error: message, ...extra }, { status });
 }
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
+function isAdmin(request) {
+  const t = request.headers.get('x-admin-token') || '';
+  return t && t === ADMIN_PASSWORD;
+}
+function requireAdmin(request) {
+  if (!isAdmin(request)) return err('Unauthorized', 401);
+  return null;
+}
 function genCode(len = 5) {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let s = '';
@@ -44,6 +53,7 @@ async function getRoute(path, request) {
 
   // GET /api/wars — list wars (admin)
   if (path === 'wars') {
+    const gate = requireAdmin(request); if (gate) return gate;
     const wars = await db.collection('wars').find({}, { projection: { _id: 0 } }).sort({ createdAt: -1 }).toArray();
     return json({ ok: true, wars });
   }
@@ -65,6 +75,7 @@ async function getRoute(path, request) {
   // GET /api/wars/:id/full — admin full state
   const fullMatch = path.match(/^wars\/([^/]+)\/full$/);
   if (fullMatch) {
+    const gate = requireAdmin(request); if (gate) return gate;
     const war = await db.collection('wars').findOne({ id: fullMatch[1] }, { projection: { _id: 0 } });
     if (!war) return err('WAR not found', 404);
     await refreshWarStatus(db, war);
@@ -89,8 +100,16 @@ async function postRoute(path, request) {
   await ensureIndexes();
   const body = await request.json().catch(() => ({}));
 
-  // POST /api/wars — create war
+  // POST /api/admin/login — verify password, return token
+  if (path === 'admin/login') {
+    const { password } = body;
+    if (password && password === ADMIN_PASSWORD) return json({ ok: true, token: ADMIN_PASSWORD });
+    return err('Invalid password', 401);
+  }
+
+  // POST /api/wars — create war (ADMIN)
   if (path === 'wars') {
+    const gate = requireAdmin(request); if (gate) return gate;
     const { name, description = '', startAt, endAt, rooms = [], allowRoomChange = false } = body;
     if (!name || !startAt || !endAt) return err('name, startAt, endAt required');
     if (!Array.isArray(rooms) || rooms.length === 0) return err('At least one room required');
@@ -136,9 +155,10 @@ async function postRoute(path, request) {
     return json({ ok: true, war: { ...war, _id: undefined } });
   }
 
-  // POST /api/wars/:id/start — force start now
+  // POST /api/wars/:id/start — force start now (ADMIN)
   const startMatch = path.match(/^wars\/([^/]+)\/start$/);
   if (startMatch) {
+    const gate = requireAdmin(request); if (gate) return gate;
     const war = await db.collection('wars').findOne({ id: startMatch[1] });
     if (!war) return err('WAR not found', 404);
     const now = new Date();
@@ -148,23 +168,26 @@ async function postRoute(path, request) {
     return json({ ok: true });
   }
 
-  // POST /api/wars/:id/end — end war
+  // POST /api/wars/:id/end — end war (ADMIN)
   const endMatch = path.match(/^wars\/([^/]+)\/end$/);
   if (endMatch) {
+    const gate = requireAdmin(request); if (gate) return gate;
     await db.collection('wars').updateOne({ id: endMatch[1] }, { $set: { status: 'COMPLETED', endAt: new Date().toISOString() } });
     return json({ ok: true });
   }
 
-  // POST /api/wars/:id/cancel
+  // POST /api/wars/:id/cancel (ADMIN)
   const cancelMatch = path.match(/^wars\/([^/]+)\/cancel$/);
   if (cancelMatch) {
+    const gate = requireAdmin(request); if (gate) return gate;
     await db.collection('wars').updateOne({ id: cancelMatch[1] }, { $set: { status: 'CANCELLED' } });
     return json({ ok: true });
   }
 
-  // POST /api/wars/:id/reset — reset all assignments (dev tool)
+  // POST /api/wars/:id/reset — reset all assignments (ADMIN)
   const resetMatch = path.match(/^wars\/([^/]+)\/reset$/);
   if (resetMatch) {
+    const gate = requireAdmin(request); if (gate) return gate;
     const war = await db.collection('wars').findOne({ id: resetMatch[1] });
     if (!war) return err('WAR not found', 404);
     const rooms = war.rooms.map((r) => ({ ...r, slotsLeft: r.capacity, assignedCount: 0 }));
@@ -174,19 +197,39 @@ async function postRoute(path, request) {
     return json({ ok: true });
   }
 
-  // POST /api/join — join war by code as participant
+  // POST /api/wars/:id/delete — permanently delete war (ADMIN)
+  const deleteMatch = path.match(/^wars\/([^/]+)\/delete$/);
+  if (deleteMatch) {
+    const gate = requireAdmin(request); if (gate) return gate;
+    const warId = deleteMatch[1];
+    await db.collection('wars').deleteOne({ id: warId });
+    await db.collection('participants').deleteMany({ warId });
+    await db.collection('activity_logs').deleteMany({ warId });
+    return json({ ok: true });
+  }
+
+  // POST /api/join — student joins by WAR CODE + NISN (participantCode)
   if (path === 'join') {
-    const { code, name, participantCode } = body;
-    if (!code || !name) return err('code and name required');
+    const { code, name, participantCode, nisn } = body;
+    const pcodeRaw = (nisn || participantCode || '').toString().trim();
+    if (!code || !pcodeRaw) return err('WAR code dan NISN wajib');
     const war = await db.collection('wars').findOne({ code: code.toUpperCase() });
-    if (!war) return err('WAR not found', 404);
-    if (['COMPLETED', 'CANCELLED'].includes(war.status)) return err('WAR is closed', 400);
+    if (!war) return err('WAR tidak ditemukan', 404);
+    if (['COMPLETED', 'CANCELLED'].includes(war.status)) return err('WAR sudah ditutup', 400);
 
-    const pcode = (participantCode && String(participantCode).trim()) || String(name).slice(0, 20).toUpperCase();
+    const pcode = pcodeRaw.toUpperCase().slice(0, 32);
 
-    // Upsert-ish: if participant with same code exists in war, return it (re-join)
+    // Try to find existing participant (by NISN)
     let participant = await db.collection('participants').findOne({ warId: war.id, participantCode: pcode });
+
     if (!participant) {
+      // Check whether this WAR requires pre-import (any participant flagged preImported)
+      const hasImported = await db.collection('participants').countDocuments({ warId: war.id, preImported: true });
+      if (hasImported > 0) {
+        return err('NISN tidak terdaftar untuk WAR ini', 403);
+      }
+      // Open-registration: name required
+      if (!name) return err('Nama wajib untuk pendaftaran mandiri', 400);
       participant = {
         id: uuidv4(),
         warId: war.id,
@@ -194,12 +237,12 @@ async function postRoute(path, request) {
         name: String(name).trim(),
         roomId: null,
         assignedAt: null,
+        preImported: false,
         createdAt: new Date().toISOString(),
       };
       try {
         await db.collection('participants').insertOne(participant);
       } catch (e) {
-        // race on unique index — refetch
         participant = await db.collection('participants').findOne({ warId: war.id, participantCode: pcode });
       }
     }
@@ -281,33 +324,56 @@ async function postRoute(path, request) {
     });
   }
 
-  // POST /api/wars/:id/participants — add participant manually (admin)
+  // POST /api/wars/:id/participants — add / import participants (ADMIN)
   const addPMatch = path.match(/^wars\/([^/]+)\/participants$/);
   if (addPMatch) {
+    const gate = requireAdmin(request); if (gate) return gate;
     const warId = addPMatch[1];
     const war = await db.collection('wars').findOne({ id: warId });
     if (!war) return err('WAR not found', 404);
     const list = Array.isArray(body.participants) ? body.participants : [body];
     const inserted = [];
+    const skipped = [];
     for (const item of list) {
       const name = String(item.name || '').trim();
-      if (!name) continue;
-      const pcode = String(item.participantCode || name).slice(0, 24).toUpperCase();
+      const pcodeRaw = String(item.participantCode || item.nisn || '').trim();
+      if (!name || !pcodeRaw) { skipped.push({ name, participantCode: pcodeRaw, reason: 'missing' }); continue; }
+      const pcode = pcodeRaw.slice(0, 32).toUpperCase();
       const exists = await db.collection('participants').findOne({ warId, participantCode: pcode });
-      if (exists) continue;
+      if (exists) { skipped.push({ name, participantCode: pcode, reason: 'duplicate' }); continue; }
       const p = {
         id: uuidv4(), warId, participantCode: pcode, name,
-        roomId: null, assignedAt: null, createdAt: new Date().toISOString(),
+        roomId: null, assignedAt: null, preImported: true,
+        createdAt: new Date().toISOString(),
       };
       await db.collection('participants').insertOne(p);
       inserted.push({ ...p, _id: undefined });
     }
-    return json({ ok: true, inserted });
+    return json({ ok: true, inserted, skipped });
   }
 
-  // POST /api/wars/:warId/assign — admin manual assign
+  // POST /api/wars/:warId/participants/:pid/remove — remove a participant (ADMIN)
+  const removePMatch = path.match(/^wars\/([^/]+)\/participants\/([^/]+)\/remove$/);
+  if (removePMatch) {
+    const gate = requireAdmin(request); if (gate) return gate;
+    const [, warId, pid] = removePMatch;
+    const p = await db.collection('participants').findOne({ id: pid, warId });
+    if (!p) return err('Participant not found', 404);
+    if (p.roomId) {
+      // free the slot
+      await db.collection('wars').updateOne(
+        { id: warId, 'rooms.id': p.roomId },
+        { $inc: { 'rooms.$.slotsLeft': 1, 'rooms.$.assignedCount': -1 } }
+      );
+    }
+    await db.collection('participants').deleteOne({ id: pid });
+    return json({ ok: true });
+  }
+
+  // POST /api/wars/:warId/assign — admin manual assign (ADMIN)
   const assignMatch = path.match(/^wars\/([^/]+)\/assign$/);
   if (assignMatch) {
+    const gate = requireAdmin(request); if (gate) return gate;
     const warId = assignMatch[1];
     const { participantId, roomId } = body;
     // reuse claim logic but allow regardless of status
@@ -333,9 +399,10 @@ async function postRoute(path, request) {
     return json({ ok: true });
   }
 
-  // POST /api/wars/:warId/unassign — admin reset a participant's assignment
+  // POST /api/wars/:warId/unassign — admin reset a participant's assignment (ADMIN)
   const unassignMatch = path.match(/^wars\/([^/]+)\/unassign$/);
   if (unassignMatch) {
+    const gate = requireAdmin(request); if (gate) return gate;
     const warId = unassignMatch[1];
     const { participantId } = body;
     const p = await db.collection('participants').findOne({ id: participantId });

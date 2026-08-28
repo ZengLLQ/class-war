@@ -13,9 +13,18 @@ import { Separator } from '@/components/ui/separator';
 import { Swords, Users, Timer, Zap, Trophy, Copy, Plus, Trash2, ChevronRight, LogIn, Shield, RefreshCw, X, Check, Loader2, Flame } from 'lucide-react';
 
 const api = {
-  async get(path) { const r = await fetch(`/api/${path}`, { cache: 'no-store' }); return r.json(); },
+  async get(path) {
+    const headers = {};
+    const t = typeof window !== 'undefined' ? localStorage.getItem('wk_admin_token') : null;
+    if (t) headers['x-admin-token'] = t;
+    const r = await fetch(`/api/${path}`, { cache: 'no-store', headers });
+    return r.json();
+  },
   async post(path, body) {
-    const r = await fetch(`/api/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+    const headers = { 'Content-Type': 'application/json' };
+    const t = typeof window !== 'undefined' ? localStorage.getItem('wk_admin_token') : null;
+    if (t) headers['x-admin-token'] = t;
+    const r = await fetch(`/api/${path}`, { method: 'POST', headers, body: JSON.stringify(body || {}) });
     return r.json();
   },
 };
@@ -117,11 +126,75 @@ function HomeScreen() {
 function AdminScreen() {
   const [wars, setWars] = useState([]);
   const [creating, setCreating] = useState(false);
+  const [authed, setAuthed] = useState(false);
+  const [pw, setPw] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+
+  useEffect(() => {
+    const t = localStorage.getItem('wk_admin_token');
+    if (t) setAuthed(true);
+  }, []);
+
   const load = useCallback(async () => {
     const r = await api.get('wars');
     if (r.ok) setWars(r.wars);
+    else if (r.error === 'Unauthorized') {
+      localStorage.removeItem('wk_admin_token');
+      setAuthed(false);
+    }
   }, []);
-  useEffect(() => { load(); }, [load]);
+
+  useEffect(() => { if (authed) load(); }, [authed, load]);
+
+  const login = async () => {
+    setAuthLoading(true);
+    const r = await api.post('admin/login', { password: pw });
+    setAuthLoading(false);
+    if (r.ok) {
+      localStorage.setItem('wk_admin_token', r.token);
+      setAuthed(true);
+      toast.success('Selamat datang, admin');
+    } else toast.error(r.error || 'Password salah');
+  };
+
+  const logout = () => {
+    localStorage.removeItem('wk_admin_token');
+    setAuthed(false);
+    setPw('');
+    window.location.hash = '';
+  };
+
+  const deleteWar = async (w) => {
+    if (!confirm(`Hapus WAR "${w.name}" permanen? Semua data peserta akan hilang.`)) return;
+    const r = await api.post(`wars/${w.id}/delete`);
+    if (r.ok) { toast.success('WAR dihapus'); load(); }
+    else toast.error(r.error || 'Gagal');
+  };
+
+  if (!authed) {
+    return (
+      <div className="container mx-auto max-w-md px-5 py-16">
+        <div className="text-center mb-6">
+          <div className="text-xs tracking-[0.3em] text-primary font-semibold">ADMIN</div>
+          <h1 className="text-3xl font-black mt-1">Masuk Admin</h1>
+          <p className="text-sm text-muted-foreground mt-1">Password diperlukan untuk mengelola WAR.</p>
+        </div>
+        <Card>
+          <CardContent className="p-5 space-y-3">
+            <div>
+              <Label>Password</Label>
+              <Input type="password" value={pw} onChange={(e) => setPw(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && login()} className="h-12" placeholder="••••••••" />
+            </div>
+            <Button className="w-full h-12" disabled={!pw || authLoading} onClick={login}>
+              {authLoading ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Shield className="h-4 w-4 mr-2" />} Login
+            </Button>
+            <Button variant="ghost" className="w-full" onClick={() => { window.location.hash = ''; }}>Kembali</Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
   return (
     <div className="container mx-auto max-w-3xl px-5 py-10">
       <div className="flex items-center justify-between mb-6">
@@ -129,7 +202,10 @@ function AdminScreen() {
           <div className="text-xs tracking-[0.3em] text-primary font-semibold">ADMIN</div>
           <h1 className="text-3xl font-black">WAR Manager</h1>
         </div>
-        <Button variant="ghost" onClick={() => { window.location.hash = ''; }}><X className="h-4 w-4" /></Button>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={logout}>Logout</Button>
+          <Button variant="ghost" size="icon" onClick={() => { window.location.hash = ''; }}><X className="h-4 w-4" /></Button>
+        </div>
       </div>
       {!creating ? (
         <Button className="w-full h-12 mb-6" onClick={() => setCreating(true)}><Plus className="h-4 w-4 mr-2" /> Create New WAR</Button>
@@ -139,17 +215,20 @@ function AdminScreen() {
       <div className="mt-6 space-y-3">
         {wars.length === 0 && <p className="text-muted-foreground text-sm">Belum ada WAR.</p>}
         {wars.map((w) => (
-          <Card key={w.id} className="hover:border-primary/50 transition-colors cursor-pointer" onClick={() => { window.location.hash = `dashboard/${w.id}`; }}>
-            <CardContent className="p-4 flex items-center justify-between">
-              <div>
+          <Card key={w.id} className="hover:border-primary/50 transition-colors">
+            <CardContent className="p-4 flex items-center justify-between gap-3">
+              <div className="cursor-pointer flex-1 min-w-0" onClick={() => { window.location.hash = `dashboard/${w.id}`; }}>
                 <div className="flex items-center gap-2 mb-1">
                   <Badge variant={w.status === 'LIVE' ? 'default' : 'secondary'} className={w.status === 'LIVE' ? 'bg-primary text-primary-foreground animate-pulse' : ''}>{w.status}</Badge>
                   <span className="font-mono text-xs text-muted-foreground">#{w.code}</span>
                 </div>
-                <h3 className="font-bold">{w.name}</h3>
+                <h3 className="font-bold truncate">{w.name}</h3>
                 <p className="text-xs text-muted-foreground">{w.rooms?.length || 0} ruangan · Cap total {(w.rooms || []).reduce((a, r) => a + r.capacity, 0)}</p>
               </div>
-              <ChevronRight className="h-5 w-5 text-muted-foreground" />
+              <div className="flex items-center gap-1 shrink-0">
+                <Button size="icon" variant="ghost" onClick={(e) => { e.stopPropagation(); deleteWar(w); }} title="Hapus WAR"><Trash2 className="h-4 w-4 text-destructive" /></Button>
+                <ChevronRight className="h-5 w-5 text-muted-foreground" />
+              </div>
             </CardContent>
           </Card>
         ))}
@@ -235,24 +314,29 @@ function CreateWarForm({ onDone, onCancel }) {
 
 function JoinScreen({ code, onJoined }) {
   const [name, setName] = useState('');
-  const [participantCode, setParticipantCode] = useState('');
+  const [nisn, setNisn] = useState('');
   const [war, setWar] = useState(null);
   const [loading, setLoading] = useState(true);
   const [joining, setJoining] = useState(false);
+  const [requireImport, setRequireImport] = useState(false); // if any pre-imported peserta ada di war, name tidak dipakai
 
   useEffect(() => {
     (async () => {
       const r = await api.get(`wars/code/${code}`);
       setLoading(false);
-      if (r.ok) setWar(r.war);
-      else toast.error(r.error || 'WAR not found');
+      if (r.ok) {
+        setWar(r.war);
+        // heuristic: if participant count > 0, assume pre-imported list; ask NISN only.
+        setRequireImport(r.participantCount > 0);
+      } else toast.error(r.error || 'WAR not found');
     })();
   }, [code]);
 
   const submit = async () => {
-    if (!name.trim()) return toast.error('Nama wajib');
+    if (!nisn.trim()) return toast.error('NISN wajib');
+    if (!requireImport && !name.trim()) return toast.error('Nama wajib');
     setJoining(true);
-    const r = await api.post('join', { code, name: name.trim(), participantCode: participantCode.trim() || undefined });
+    const r = await api.post('join', { code, nisn: nisn.trim(), name: name.trim() });
     setJoining(false);
     if (r.ok) { toast.success('Masuk lobby'); onJoined(r.warCode, r.participant.id); }
     else toast.error(r.error || 'Gagal join');
@@ -274,9 +358,17 @@ function JoinScreen({ code, onJoined }) {
       </div>
       <Card>
         <CardContent className="p-5 space-y-4">
-          <div><Label>Nama Lengkap</Label><Input value={name} onChange={(e) => setName(e.target.value)} className="h-12" placeholder="Jonathan" /></div>
-          <div><Label>NIM / Participant ID <span className="text-muted-foreground text-xs">(opsional)</span></Label>
-            <Input value={participantCode} onChange={(e) => setParticipantCode(e.target.value)} className="h-12 font-mono" placeholder="001" /></div>
+          <div>
+            <Label>NISN</Label>
+            <Input value={nisn} onChange={(e) => setNisn(e.target.value.toUpperCase())} className="h-12 font-mono tracking-widest" placeholder="0012345678" />
+            {requireImport && <p className="text-xs text-muted-foreground mt-1">Masukkan NISN kamu yang sudah didaftarkan admin.</p>}
+          </div>
+          {!requireImport && (
+            <div>
+              <Label>Nama Lengkap</Label>
+              <Input value={name} onChange={(e) => setName(e.target.value)} className="h-12" placeholder="Jonathan" />
+            </div>
+          )}
           <Button className="w-full h-12 text-base" disabled={joining} onClick={submit}>
             {joining ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Flame className="h-4 w-4 mr-2" />} Masuk Lobby
           </Button>
@@ -486,11 +578,18 @@ function ParticipantScreen({ code, participantId }) {
 
 function DashboardScreen({ warId }) {
   const [data, setData] = useState(null);
+  const [authed, setAuthed] = useState(true);
   const load = useCallback(async () => {
     const r = await api.get(`wars/${warId}/full`);
     if (r.ok) setData(r);
+    else if (r.error === 'Unauthorized') {
+      localStorage.removeItem('wk_admin_token');
+      setAuthed(false);
+      window.location.hash = 'admin';
+    }
   }, [warId]);
   useEffect(() => {
+    if (!localStorage.getItem('wk_admin_token')) { window.location.hash = 'admin'; return; }
     load();
     const t = setInterval(load, 900);
     return () => clearInterval(t);
@@ -505,34 +604,78 @@ function DashboardScreen({ warId }) {
   const assigned = participants.filter((p) => p.roomId).length;
 
   const [addName, setAddName] = useState('');
-  const [addCode, setAddCode] = useState('');
+  const [addNisn, setAddNisn] = useState('');
   const [bulk, setBulk] = useState('');
   const [showBulk, setShowBulk] = useState(false);
+  const fileRef = useRef(null);
 
   const start = async () => { await api.post(`wars/${warId}/start`); toast.success('WAR started'); load(); };
   const endWar = async () => { await api.post(`wars/${warId}/end`); toast.success('WAR ended'); load(); };
   const reset = async () => { if (confirm('Reset semua assignment?')) { await api.post(`wars/${warId}/reset`); toast.success('Reset'); load(); } };
   const cancel = async () => { if (confirm('Batalkan WAR?')) { await api.post(`wars/${warId}/cancel`); load(); } };
+  const deleteWar = async () => {
+    if (!confirm('Hapus WAR ini permanen? Semua data peserta akan hilang.')) return;
+    const r = await api.post(`wars/${warId}/delete`);
+    if (r.ok) { toast.success('WAR dihapus'); window.location.hash = 'admin'; }
+  };
 
   const addParticipant = async () => {
-    if (!addName.trim()) return;
-    const r = await api.post(`wars/${warId}/participants`, { name: addName.trim(), participantCode: addCode.trim() });
-    if (r.ok) { toast.success('Added'); setAddName(''); setAddCode(''); load(); }
+    if (!addName.trim() || !addNisn.trim()) return toast.error('Nama & NISN wajib');
+    const r = await api.post(`wars/${warId}/participants`, { name: addName.trim(), participantCode: addNisn.trim() });
+    if (r.ok) { toast.success('Peserta ditambah'); setAddName(''); setAddNisn(''); load(); }
   };
-  const importBulk = async () => {
-    const lines = bulk.split('\n').map((l) => l.trim()).filter(Boolean);
-    const list = lines.map((l) => {
-      const parts = l.split(/[,;\t|]/).map((x) => x.trim());
-      if (parts.length >= 2) return { participantCode: parts[0], name: parts.slice(1).join(' ') };
-      return { name: parts[0] };
-    });
+
+  // Parse CSV/TSV text into { name, participantCode }
+  const parseCsv = (text) => {
+    const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    if (lines.length === 0) return [];
+    // detect header
+    const first = lines[0].toLowerCase();
+    const hasHeader = /nisn|nama|name/i.test(first);
+    const rows = hasHeader ? lines.slice(1) : lines;
+    // detect columns from header
+    let nisnIdx = 0, nameIdx = 1;
+    if (hasHeader) {
+      const cols = first.split(/[,;\t|]/).map((x) => x.trim());
+      const ni = cols.findIndex((c) => /nisn|nis|code|id/i.test(c));
+      const na = cols.findIndex((c) => /nama|name/i.test(c));
+      if (ni >= 0) nisnIdx = ni;
+      if (na >= 0) nameIdx = na;
+    }
+    return rows.map((l) => {
+      const cols = l.split(/[,;\t|]/).map((x) => x.trim().replace(/^"|"$/g, ''));
+      const nisn = cols[nisnIdx] || '';
+      const name = cols[nameIdx] || cols.filter((_, i) => i !== nisnIdx).join(' ');
+      return { participantCode: nisn, name };
+    }).filter((r) => r.name && r.participantCode);
+  };
+
+  const importParticipants = async (list) => {
+    if (list.length === 0) return toast.error('Tidak ada data valid');
     const r = await api.post(`wars/${warId}/participants`, { participants: list });
-    if (r.ok) { toast.success(`Imported ${r.inserted.length}`); setBulk(''); setShowBulk(false); load(); }
+    if (r.ok) {
+      toast.success(`Imported ${r.inserted.length}${r.skipped?.length ? ` · Skip ${r.skipped.length}` : ''}`);
+      setBulk(''); setShowBulk(false); load();
+    } else toast.error(r.error || 'Gagal');
   };
+
+  const importBulkText = async () => importParticipants(parseCsv(bulk));
+
+  const importFile = async (file) => {
+    if (!file) return;
+    const text = await file.text();
+    importParticipants(parseCsv(text));
+  };
+
   const unassign = async (pid) => { await api.post(`wars/${warId}/unassign`, { participantId: pid }); load(); };
+  const removeParticipant = async (pid) => {
+    if (!confirm('Hapus peserta ini?')) return;
+    await api.post(`wars/${warId}/participants/${pid}/remove`);
+    load();
+  };
 
   const exportCsv = () => {
-    const rows = [['ParticipantID', 'Name', 'Room', 'AssignedAt']];
+    const rows = [['NISN', 'Nama', 'Ruangan', 'Waktu']];
     participants.forEach((p) => {
       const rr = war.rooms.find((x) => x.id === p.roomId);
       rows.push([p.participantCode, p.name, rr?.name || '', p.assignedAt || '']);
@@ -547,6 +690,7 @@ function DashboardScreen({ warId }) {
   const joinUrl = typeof window !== 'undefined' && war ? `${window.location.origin}/#join/${war.code}` : '';
   const copyJoin = () => { navigator.clipboard.writeText(joinUrl); toast.success('Link copied'); };
 
+  if (!authed) return null;
   if (!war) return <div className="p-8 text-center"><Loader2 className="h-5 w-5 animate-spin inline mr-2" />Loading…</div>;
 
   return (
@@ -580,6 +724,7 @@ function DashboardScreen({ warId }) {
         <Button variant="outline" onClick={reset}><RefreshCw className="h-4 w-4 mr-1" />Reset</Button>
         <Button variant="outline" onClick={exportCsv}><Trophy className="h-4 w-4 mr-1" />Export CSV</Button>
         {war.status !== 'CANCELLED' && war.status !== 'COMPLETED' && <Button variant="ghost" onClick={cancel}>Cancel</Button>}
+        <Button variant="destructive" onClick={deleteWar} className="ml-auto"><Trash2 className="h-4 w-4 mr-1" />Delete WAR</Button>
       </div>
 
       <div className="grid md:grid-cols-2 gap-4">
@@ -623,36 +768,46 @@ function DashboardScreen({ warId }) {
       </div>
 
       <Card className="mt-4">
-        <CardHeader><CardTitle className="text-sm tracking-widest">PARTICIPANTS ({participants.length})</CardTitle></CardHeader>
+        <CardHeader>
+          <CardTitle className="text-sm tracking-widest flex items-center gap-2">
+            SISWA ({participants.length})
+            <span className="ml-auto text-xs font-normal text-muted-foreground">Kolom: NISN, Nama</span>
+          </CardTitle>
+        </CardHeader>
         <CardContent>
           <div className="flex flex-wrap gap-2 mb-3">
-            <Input placeholder="Name" value={addName} onChange={(e) => setAddName(e.target.value)} className="max-w-[200px]" />
-            <Input placeholder="Code" value={addCode} onChange={(e) => setAddCode(e.target.value)} className="max-w-[140px] font-mono" />
+            <Input placeholder="NISN" value={addNisn} onChange={(e) => setAddNisn(e.target.value)} className="max-w-[160px] font-mono" />
+            <Input placeholder="Nama" value={addName} onChange={(e) => setAddName(e.target.value)} className="max-w-[220px]" />
             <Button onClick={addParticipant}><Plus className="h-4 w-4 mr-1" />Add</Button>
-            <Button variant="outline" onClick={() => setShowBulk(!showBulk)}>Import Bulk</Button>
+            <input ref={fileRef} type="file" accept=".csv,.txt,.tsv" className="hidden" onChange={(e) => importFile(e.target.files?.[0])} />
+            <Button variant="outline" onClick={() => fileRef.current?.click()}>Upload CSV</Button>
+            <Button variant="outline" onClick={() => setShowBulk(!showBulk)}>Paste List</Button>
           </div>
           {showBulk && (
             <div className="mb-3">
-              <Textarea rows={5} placeholder={"001, Jonathan\n002, Michael\nSarah"} value={bulk} onChange={(e) => setBulk(e.target.value)} className="font-mono text-sm" />
-              <Button size="sm" className="mt-2" onClick={importBulk}>Import</Button>
+              <p className="text-xs text-muted-foreground mb-1">Format per baris: <span className="font-mono">NISN, Nama</span> (koma / tab / semicolon). Header opsional.</p>
+              <Textarea rows={5} placeholder={"NISN,Nama\n0012345678, Jonathan\n0012345679, Michael"} value={bulk} onChange={(e) => setBulk(e.target.value)} className="font-mono text-sm" />
+              <Button size="sm" className="mt-2" onClick={importBulkText}>Import {parseCsv(bulk).length} baris</Button>
             </div>
           )}
           <div className="max-h-96 overflow-y-auto divide-y">
+            {participants.length === 0 && <p className="text-sm text-muted-foreground py-6 text-center">Belum ada siswa. Upload CSV atau tambah manual.</p>}
             {participants.map((p) => {
               const rr = war.rooms.find((x) => x.id === p.roomId);
               return (
                 <div key={p.id} className="flex items-center gap-3 py-2 text-sm">
-                  <span className="mono text-xs text-muted-foreground w-16 truncate">{p.participantCode}</span>
+                  <span className="mono text-xs text-muted-foreground w-24 truncate">{p.participantCode}</span>
                   <span className="flex-1 truncate">{p.name}</span>
                   {rr ? (
                     <>
                       <Badge className="bg-primary">{rr.name}</Badge>
                       <span className="mono text-xs text-muted-foreground hidden md:inline">{fmtTimeMs(p.assignedAt).slice(0, 12)}</span>
-                      <Button size="sm" variant="ghost" onClick={() => unassign(p.id)}><X className="h-3 w-3" /></Button>
+                      <Button size="sm" variant="ghost" onClick={() => unassign(p.id)} title="Reset assignment"><RefreshCw className="h-3 w-3" /></Button>
                     </>
                   ) : (
                     <Badge variant="outline">Unassigned</Badge>
                   )}
+                  <Button size="sm" variant="ghost" onClick={() => removeParticipant(p.id)} title="Hapus siswa"><Trash2 className="h-3 w-3 text-destructive" /></Button>
                 </div>
               );
             })}
@@ -664,7 +819,7 @@ function DashboardScreen({ warId }) {
         <CardContent className="p-4 flex items-center gap-3 flex-wrap">
           <Users className="h-5 w-5 text-primary" />
           <div className="text-sm">
-            <div className="text-xs text-muted-foreground">Share this link to participants</div>
+            <div className="text-xs text-muted-foreground">Share link ke siswa</div>
             <div className="font-mono text-sm break-all">{joinUrl}</div>
           </div>
           <Button size="sm" variant="outline" onClick={copyJoin} className="ml-auto"><Copy className="h-4 w-4 mr-1" />Copy</Button>
